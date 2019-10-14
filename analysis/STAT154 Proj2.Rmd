@@ -1,0 +1,191 @@
+---
+title: "STAT154 Proj2"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(GGally)
+```
+
+```{r}
+columns <-  c("y", "x", "label", "NDAI", "SD", "CORR", "RADF", "RACF", "RABF", "RAAF", "RAAN")
+im1 <- read.table("image_data/image1.txt", col.names = columns)
+im2 <- read.table("image_data/image2.txt", col.names = columns)
+im3 <- read.table("image_data/image3.txt", col.names = columns)
+im1
+```
+
+```{r}
+# pairwise relationship between features
+# BE CAREFUL! Running the following line may take longer than five minutes.
+#ggpairs(im1[,4:10])
+```
+
+```{r}
+# Since the dataframe is too large, radomly sample some rows from the dataframe to make the plots.
+set.seed(12345)
+ind <- sample(1:dim(im1)[1], dim(im1)[1]*.1, rep=FALSE)
+im1_sampled <- im1[ind,]
+
+# Make the boxplots
+par(mfrow = c(2, 4))
+boxplot(NDAI ~ label, data=im1_sampled, xlab="expert label", ylab="NDAI")
+boxplot(SD ~ label, data=im1_sampled, xlab="expert label", ylab="SD")
+boxplot(CORR ~ label, data=im1_sampled, xlab="expert label", ylab="CORR")
+boxplot(RADF ~ label, data=im1_sampled, xlab="expert label", ylab="RADF")
+boxplot(RACF ~ label, data=im1_sampled, xlab="expert label", ylab="RACF")
+boxplot(RABF ~ label, data=im1_sampled, xlab="expert label", ylab="RABF")
+boxplot(RAAF ~ label, data=im1_sampled, xlab="expert label", ylab="RAAF")
+boxplot(RAAN ~ label, data=im1_sampled, xlab="expert label", ylab="RAAN")
+```
+
+
+```{r}
+# Data splitting: method 1
+# range for x
+x_range <- max(im1$x) - min(im1$x)
+# range for y
+y_range <- max(im1$y) - min(im1$y)
+# width of each block
+div_x <- ceiling(x_range / 5)
+# width of each block
+div_y <- ceiling(y_range / 2)
+
+# Make a copy for each image
+one <- im1
+two <- im2
+three <- im3
+
+cut_blocks <- function(im){
+  count = 1
+  blocks = NULL
+  for (i in 1:5) {
+    for (j in 1:2) {
+      # d contains data assigned to the current block
+      d <- im[(im$x <= min(im1$x) + div_x*i) & (im$y <= min(im1$y) + div_y*j), ]
+      d$block <- rep(as.factor(count), nrow(d))
+      blocks <- rbind(blocks, d)
+      count <- count+1
+      # im contains the unassigned data
+      im <- im[(im$x > min(im1$x) + div_x*i) | (im$y > min(im1$y) + div_y*j), ]
+    }
+  } 
+  return (blocks)
+}
+
+# cut each image into ten blocks
+blocks_one <- cut_blocks(one)
+blocks_two <- cut_blocks(two)
+blocks_three <- cut_blocks(three)
+
+# randomly assign one block as test set and two blocks as validation set, and seven blocks as the training set
+set.seed(1234)
+ind_one <- sample(1:10, 10, replace=FALSE)
+set.seed(12345)
+ind_two <- sample(1:10, 10, replace=FALSE)
+set.seed(123456)
+ind_three <- sample(1:10, 10, replace=FALSE)
+
+train.1 <- NULL
+val.1 <- NULL
+test.1 <- NULL
+
+for (i in 1:7){
+  train.1 <- rbind(train.1, 
+                 blocks_one[blocks_one$block == ind_one[i], ],
+                 blocks_two[blocks_two$block == ind_two[i], ],
+                 blocks_three[blocks_three$block == ind_three[i], ])
+}
+
+for (i in 8:9){
+  val.1 <- rbind(val.1, 
+                 blocks_one[blocks_one$block == ind_one[i], ],
+                 blocks_two[blocks_two$block == ind_two[i], ],
+                 blocks_three[blocks_three$block == ind_three[i], ])
+}
+
+test.1 <- rbind(test.1, 
+                 blocks_one[blocks_one$block == ind_one[10], ],
+                 blocks_two[blocks_two$block == ind_two[10], ],
+                 blocks_three[blocks_three$block == ind_three[10], ])
+
+# validate that the total number of data points is right
+nrow(im1) + nrow(im2) + nrow(im3) == nrow(train.1) + nrow(val.1) + nrow(test.1)
+
+ggplot() + geom_point(data=blocks_one,aes(x=x, y=y,color=block)) + scale_fill_brewer(palette="Dark2")
+```
+```{r}
+ceiling(x_range / 5)
+floor(x_range / 5)
+```
+
+
+```{r}
+# Data splitting: method 2
+# range for x
+x_range <- max(im1$x) - min(im1$x)
+# width of each block
+div_x <- ceiling(x_range / 10)
+
+# Make a copy for each image
+one <- im1
+two <- im2
+three <- im3
+
+cut_strips <- function(im){
+  blocks = NULL
+  for (i in 1:10) {
+      # d contains data assigned to the current block
+      d <- im[(im$x < min(im$x) + div_x*i) & (im$x >= min(im$x) + div_x*(i-1)), ]
+      d$block <- rep(as.factor(i), nrow(d))
+      blocks <- rbind(blocks, d)
+  } 
+  return (blocks)
+}
+
+# cut each image into ten blocks
+strips_one <- cut_strips(one)
+strips_two <- cut_strips(two)
+strips_three <- cut_strips(three)
+
+# randomly assign one block as test set and two blocks as validation set, and seven blocks as the training set
+set.seed(1234)
+ind_one <- sample(1:10, 10, replace=FALSE)
+set.seed(12345)
+ind_two <- sample(1:10, 10, replace=FALSE)
+set.seed(123456)
+ind_three <- sample(1:10, 10, replace=FALSE)
+
+train.2 <- NULL
+val.2 <- NULL
+test.2 <- NULL
+
+for (i in 1:7){
+  train.2 <- rbind(train.2, 
+                 strips_one[strips_one$block == ind_one[i], ],
+                 strips_two[strips_two$block == ind_one[i], ],
+                 strips_three[strips_three$block == ind_one[i], ])
+}
+
+for (i in 8:9){
+  val.2 <- rbind(val.2, 
+                 strips_one[strips_one$block == ind_one[i], ],
+                 strips_two[strips_two$block == ind_one[i], ],
+                 strips_three[strips_three$block == ind_one[i], ])
+}
+
+test.2 <- rbind(test.2, 
+                 strips_one[strips_one$block == ind_one[10], ],
+                 strips_two[strips_two$block == ind_one[10], ],
+                 strips_three[strips_three$block == ind_one[10], ])
+
+# validate that the total number of data points is right
+nrow(im1) + nrow(im2) + nrow(im3) == nrow(train.2) + nrow(val.2) + nrow(test.2)
+nrow(train.2) / (nrow(im1) + nrow(im2) + nrow(im3))
+
+```
+
+
+

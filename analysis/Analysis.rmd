@@ -1,0 +1,658 @@
+---
+title: 'Stat 154: Project 2'
+author: "Rubina Aujla & Linshanshan Wang"
+date: "5/01/2019"
+output: html_document
+---
+
+### Setup
+```{r setup}
+# load packages
+library(ggplot2)
+library(GGally)
+library(RColorBrewer)
+library(caret)
+library(pROC)
+
+# add column names
+columns = c("y", "x", "label", "NDAI", "SD", "CORR", "RADF", "RACF", "RABF", "RAAF", "RAAN")
+
+# load data
+setwd("~/Desktop/project2")
+im1 = read.table("image_data/image1.txt", col.names = columns)
+im2 = read.table("image_data/image2.txt", col.names = columns)
+im3 = read.table("image_data/image3.txt", col.names = columns)
+
+# change `label` column to type `factor`
+im1$label = factor(im1$label)
+im2$label = factor(im2$label)
+im3$label = factor(im3$label)
+
+# create full dataset with image number
+dat = rbind(im1, im2, im3)
+dat$image = c(rep(1, nrow(im1)), rep(2, nrow(im2)), rep(3, nrow(im3)))
+```
+
+## 1. Data Collection and Exploration
+### 1b. Summary of Data
+```{r 1b}
+# summarize data (% of pixels per class)
+props = data.frame(class = c("not cloud (-1)", "cloud (+1)"),
+                   proportion = c(sum(dat$label == -1)/nrow(dat[dat$label != 0,]),
+                                  sum(dat$label == 1)/nrow(dat[dat$label != 0,])))
+props
+
+# plot maps of x,y with color = expert label
+ggplot(im1) + geom_point(aes(x=x, y=y, colour = label)) + ggtitle("Image 1 Data") +
+  xlab("x coordinate") + ylab("y coordinate") +
+  scale_color_manual(values = c("light blue", "gray", "white"), name="Expert Label",
+                     labels = c("not cloud (-1)", "unlabeled (0)", "cloud (+1)"))
+
+ggplot(im2) + geom_point(aes(x=x, y=y, colour = label)) + ggtitle("Image 2 Data") +
+  xlab("x coordinate") + ylab("y coordinate") +
+  scale_color_manual(values = c("light blue", "gray", "white"), name="Expert Label",
+                     labels = c("not cloud (-1)", "unlabeled (0)", "cloud (+1)"))
+
+ggplot(im3) + geom_point(aes(x=x, y=y, colour = label)) + ggtitle("Image 3 Data") +
+  xlab("x coordinate") + ylab("y coordinate") +
+  scale_color_manual(values = c("light blue", "gray", "white"), name="Expert Label",
+                     labels = c("not cloud (-1)", "unlabeled (0)", "cloud (+1)"))
+```
+
+### 1c. Visual and Quantitative EDA
+```{r 1c}
+# pairwise relationship between features
+      # BE CAREFUL! Running the following line may take longer than five minutes.
+# ggpairs(im1[,4:10])
+
+# Since the dataframe is too large, radomly sample some rows from the dataframe to make the plots
+set.seed(12345)
+ind <- sample(1:dim(im1)[1], dim(im1)[1]*.1, rep=FALSE)
+im1_sampled <- im1[ind,]
+
+# Make the boxplots
+par(mfrow = c(2, 4))
+boxplot(NDAI ~ label, data=im1_sampled, xlab="expert label", ylab="NDAI")
+boxplot(SD ~ label, data=im1_sampled, xlab="expert label", ylab="SD")
+boxplot(CORR ~ label, data=im1_sampled, xlab="expert label", ylab="CORR")
+boxplot(RADF ~ label, data=im1_sampled, xlab="expert label", ylab="RADF")
+boxplot(RACF ~ label, data=im1_sampled, xlab="expert label", ylab="RACF")
+boxplot(RABF ~ label, data=im1_sampled, xlab="expert label", ylab="RABF")
+boxplot(RAAF ~ label, data=im1_sampled, xlab="expert label", ylab="RAAF")
+boxplot(RAAN ~ label, data=im1_sampled, xlab="expert label", ylab="RAAN")
+```
+
+
+## 2. Preparation
+### 2a. Data Split
+```{r 2a}
+# METHOD 1: 10 blocks
+# Make a copy for each image
+one <- im1
+two <- im2
+three <- im3
+
+# function cut_blocks
+cut_blocks <- function(im, k){
+  x_range <- max(im$x) - min(im$x)
+  y_range <- max(im$y) - min(im$y)
+  div_x <- ceiling(x_range / (k/2))
+  div_y <- ceiling(y_range / 2)
+  count = 1
+  blocks = NULL
+  for (i in 1:(k/2)) {
+    for (j in 1:2) {
+      # d contains data assigned to the current block
+      d <- im[(im$x <= min(im1$x) + div_x*i) & (im$y <= min(im1$y) + div_y*j), ]
+      d$block <- rep(as.factor(count), nrow(d))
+      blocks <- rbind(blocks, d)
+      count <- count+1
+      # im contains the unassigned data
+      im <- im[(im$x > min(im1$x) + div_x*i) | (im$y > min(im1$y) + div_y*j), ]
+    }
+  } 
+  return (blocks)
+}
+
+# cut each image into ten blocks
+blocks_one <- cut_blocks(one, 10)
+blocks_two <- cut_blocks(two, 10)
+blocks_three <- cut_blocks(three, 10)
+
+# randomly assign one block as test set and two blocks as validation set, and seven blocks as the training set
+returnSets = function(b1, b2, b3, s1, s2, s3) {
+  set.seed(s1)
+  ind_one <- sample(1:10, 10, replace=FALSE)
+  set.seed(s2)
+  ind_two <- sample(1:10, 10, replace=FALSE)
+  set.seed(s3)
+  ind_three <- sample(1:10, 10, replace=FALSE)
+  
+  train <- NULL
+  val <- NULL
+  test <- NULL
+
+  for (i in 1:7) {
+    train <- rbind(train, 
+                     b1[b1$block == ind_one[i], ],
+                     b2[b2$block == ind_two[i], ],
+                     b3[b3$block == ind_three[i], ])
+  }
+  for (i in 8:9){
+    val <- rbind(val, 
+                   b1[b1$block == ind_one[i], ],
+                   b2[b2$block == ind_two[i], ],
+                   b3[b3$block == ind_three[i], ])
+  }
+  test <- rbind(test, 
+                  b1[b1$block == ind_one[10], ],
+                  b2[b2$block == ind_two[10], ],
+                  b3[b3$block == ind_three[10], ])
+  result = list(train = train, val = val, test = test)
+  return(result)
+}
+
+# assign test, validation, and training sets for Method 1
+sets1 = returnSets(blocks_one, blocks_two, blocks_three, 1234, 12345, 123456)
+train.1 = sets1$train
+val.1 = sets1$val
+test.1 = sets1$test
+
+# validate that the total number of data points is right
+nrow(im1) + nrow(im2) + nrow(im3) == nrow(train.1) + nrow(val.1) + nrow(test.1)
+
+# plot Method 1 on Image 1
+ggplot() + geom_point(data = blocks_one, aes(x=x, y=y, color = block)) +
+  ggtitle("Image 1: Method 1 splitting") +
+  xlab("x coordinate") + ylab("y coordinate") +
+  scale_color_manual(values = brewer.pal(n = 10, name = "RdBu"))
+
+
+
+########################################################################################
+# METHOD 2: 10 vertical strips
+
+# Make a copy for each image
+one <- im1
+two <- im2
+three <- im3
+
+cut_strips <- function(im, num){
+  x_range <- max(im$x) - min(im$x)
+  div_x <- ceiling(x_range / num)
+  blocks = NULL
+  for (i in 1:num) {
+      # d contains data assigned to the current block
+      d <- im[(im$x < min(im$x) + div_x*i) & (im$x >= min(im$x) + div_x*(i-1)), ]
+      d$block <- rep(as.factor(i), nrow(d))
+      blocks <- rbind(blocks, d)
+  } 
+  return (blocks)
+}
+
+# cut each image into ten blocks
+strips_one <- cut_strips(one, 10)
+strips_two <- cut_strips(two, 10)
+strips_three <- cut_strips(three, 10)
+
+# randomly assign one block as test set and two blocks as validation set, and seven blocks as the training set
+sets2 = returnSets(strips_one, strips_two, strips_three, 1234, 12345, 123456)
+
+# assign test, validation, and training sets for Method 2
+train.2 = sets2$train
+val.2 = sets2$val
+test.2 = sets2$test
+
+# validate that the total number of data points is right
+nrow(im1) + nrow(im2) + nrow(im3) == nrow(train.2) + nrow(val.2) + nrow(test.2)
+nrow(train.2) / (nrow(im1) + nrow(im2) + nrow(im3))
+
+# plot Method 2 on Image 1
+ggplot() + geom_point(data = strips_one, aes(x=x, y=y, color = block)) +
+  ggtitle("Image 1: Method 2 splitting") +
+  xlab("x coordinate") + ylab("y coordinate") +
+  scale_color_manual(values = brewer.pal(n = 10, name = "RdBu"))
+```
+
+
+### 2b. Baseline
+```{r}
+# create trivial classifier on validation and test sets
+val1 = val.1[val.1$label != 0,]
+val2 = val.2[val.2$label != 0,]
+test1 = test.1[test.1$label != 0,]
+test2 = test.2[test.2$label != 0,]
+
+trivial_val1 = rep(-1, nrow(val1))
+trivial_val2 = rep(-1, nrow(val2))
+trivial_test1 = rep(-1, nrow(test1))
+trivial_test2 = rep(-1, nrow(test2))
+
+# accuracy of trivial classifier on test set
+mean(trivial_test1 == test1$label)
+mean(trivial_test2 == test2$label)
+
+# accuracy of trivial classifier on validation set
+mean(trivial_val1 == val1$label)
+mean(trivial_val2 == val2$label)
+```
+
+
+### 2c. First order importance
+```{r}
+# find correlation between "label" and explanatory variables
+library(gridExtra)
+
+# Histograms comparing the distribution of values in the two groups
+train1 = train.1[train.1$label != 0,]
+p1 <- ggplot(train1, aes(NDAI, fill=label)) + geom_histogram(aes(y=..density..), alpha=0.5) + geom_density(aes(color=label), alpha=.2)
+p2 <- ggplot(train1, aes(SD, fill=label)) + geom_histogram(aes(y=..density..), alpha=0.5) + scale_x_continuous(breaks=c(0,1,2,3,4,5,10,30,100,300,1000), trans="log1p", expand=c(0,0))+ geom_density(aes(color=label), alpha=.2) + xlab("log(SD)")
+p3 <- ggplot(train1, aes(CORR, fill=label)) + geom_histogram(aes(y=..density..), alpha=0.5) + geom_density(aes(color=label), alpha=.2)
+p4 <- ggplot(train1, aes(RADF, fill=label)) + geom_histogram(aes(y=..density..), alpha=0.5) + geom_density(aes(color=label), alpha=.2)
+p5 <- ggplot(train1, aes(RACF, fill=label)) + geom_histogram(aes(y=..density..), alpha=0.5) + geom_density(aes(color=label), alpha=.2)
+p6 <- ggplot(train1, aes(RABF, fill=label)) + geom_histogram(aes(y=..density..), alpha=0.5) + geom_density(aes(color=label), alpha=.2)
+p7 <- ggplot(train1, aes(RAAF, fill=label)) + geom_histogram(aes(y=..density..), alpha=0.5) + geom_density(aes(color=label), alpha=.2)
+p8 <- ggplot(train1, aes(RAAN, fill=label)) + geom_histogram(aes(y=..density..), alpha=0.5) + geom_density(aes(color=label), alpha=.2)
+#ggarrange(p1, p2,p3,p4, p5, p6, p7, p8, ncol = 4, nrow = 2)
+
+#extract legend
+#https://github.com/hadley/ggplot2/wiki/Share-a-legend-between-two-ggplot2-graphs
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+
+mylegend<-g_legend(p1)
+
+grid.arrange(arrangeGrob(p1 + theme(legend.position="none"),
+                         p2 + theme(legend.position="none"),
+                         p3 + theme(legend.position="none"),
+                         p4 + theme(legend.position="none"),
+                         p5 + theme(legend.position="none"),
+                         p6 + theme(legend.position="none"),
+                         p7 + theme(legend.position="none"),
+                         p8 + theme(legend.position="none"),
+                         ncol = 4, nrow = 2),
+             mylegend,heights=c(10, 2))
+```
+
+```{r}
+library(dplyr)
+scaled.dat <- as.data.frame(scale(train1[,-c(3,12)]))
+scaled.dat$label <- train1$label
+
+summary <- scaled.dat %>% 
+  group_by(label) %>% 
+  summarise_all(funs(mean))
+
+abs_dif <- abs(summary[1,-1] - summary[2,-1])
+abs_dif[,c(-1,-2)]
+```
+
+
+### 2d. `CVgeneric` Function
+```{r}
+# CVgeneric function
+CVgeneric = function(classifier, data, labels, k, loss) {
+  require(caret)
+  dat1 = cut_blocks(data, k)
+  dat2 = cut_strips(data, k)
+  dat1$label = factor(dat1$label)
+  dat2$label = factor(dat2$label)
+  train_accuracy1 = c()
+  test_accuracy1 = c()
+  train_accuracy2 = c()
+  test_accuracy2 = c()
+  
+  for (i in 1:k) {
+    # fit model using Method 1 data splitting
+    train1 = dat1[dat1$block != i,]
+    test1 = dat1[dat1$block == i,]
+    
+    fit1 = train(label ~ SD + CORR + NDAI, data = train1, method = classifier)
+    pred_train1 = predict(fit1, newdata = train1)
+    pred_test1 = predict(fit1, newdata = test1)
+    
+    train_accuracy1 = c(train_accuracy1, loss(train1$label, pred_train1))
+    test_accuracy1 = c(test_accuracy1, loss(test1$label, pred_test1))
+    
+    # fit model using Method 2 data splitting
+    train2 = dat2[dat2$block != i,]
+    test2 = dat2[dat2$block == i,]
+    
+    fit2 = train(label ~ SD + CORR + NDAI, data = train2, method = classifier)
+    pred_train2 = predict(fit2, newdata = train2)
+    pred_test2 = predict(fit2, newdata = test2)
+    
+    train_accuracy2 = c(train_accuracy2, loss(train2$label, pred_train2))
+    test_accuracy2 = c(test_accuracy2, loss(test2$label, pred_test2))
+  }
+  result = list(train_accuracy1, test_accuracy1, train_accuracy2, test_accuracy2)
+  return(result)
+}
+```
+
+
+## 3. Modeling
+### 3a. Classification Methods
+```{r}
+# function to calculate accuracy across folds
+accuracy = function(labels, pred) {
+  return(mean(labels == pred))
+}
+
+# assign data and sets for Method 1
+merge_TrainVal1 = rbind(train.1, val.1)
+train1 = merge_TrainVal1[merge_TrainVal1$label != 0,]
+test1 = test.1[test.1$label != 0,]
+
+# assign data and sets for Method 2
+merge_TrainVal2 = rbind(train.2, val.2)
+train2 = merge_TrainVal2[merge_TrainVal2$label != 0,]
+test2 = test.2[test.2$label != 0,]
+
+# convert label to type factor for each set
+train1$label = factor(train1$label)
+train2$label = factor(train2$label)
+test1$label = factor(test1$label)
+test2$label = factor(test2$label)
+
+# METHOD 1: LOGISTIC REGRESSION
+lg1 = CVgeneric(classifier = "glm", data = train1, labels = train1$label, k = 4, loss = accuracy)
+lg2 = CVgeneric(classifier = "glm", data = train2, labels = train2$label, k = 4, loss = accuracy)
+
+    ### test assumption: linearity of features and odds
+lgfit1 = train(label~NDAI+SD+CORR, data = train1, method = "glm")
+probs1 = predict(lgfit1, type = "prob")
+odds = log(probs1/(1-probs1))
+cor(train1$NDAI, odds)
+cor(train1$CORR, odds)
+cor(train1$SD, odds)
+
+# METHOD 2: BAYES GENERALIZED LINEAR MODEL
+bglm1 = CVgeneric(classifier = "bayesglm", data = train1, labels = train1$label, k = 4, loss = accuracy)
+bglm2 = CVgeneric(classifier = "bayesglm", data = train2, labels = train2$label, k = 4, loss = accuracy)
+
+# METHOD 3: QUADRATIC DISCRIMINANT ANALYSIS
+qda1 = CVgeneric(classifier = "qda", data = train1, labels = train1$label, k = 4, loss = accuracy)
+qda2 = CVgeneric(classifier = "qda", data = train2, labels = train2$label, k = 4, loss = accuracy)
+
+# METHOD 4: CART (CLASSIFICATION AND REGRESSION TREE)
+cart1 = CVgeneric(classifier = "rpart1SE", data = train1, labels = train1$label, k = 4, loss = accuracy)
+cart2 = CVgeneric(classifier = "rpart1SE", data = train2, labels = train2$label, k = 4, loss = accuracy)
+
+```
+
+### 3b. ROC curves
+```{r}
+# Generic function to make the ROC plot and displays the optimal cutoff and the AUC.
+ROC_plot <- function(train, m, color){
+  # Fit the model
+  model = train(label~NDAI+SD+CORR, data = train, method = m)
+  # Predicted probabilities
+  probs = predict(model, type = "prob")
+  
+  # create the ROC object
+  pROC <- roc(train$label ~ probs[,1], smoothed = FALSE, plot=FALSE)
+  # Plot the ROC curve
+  plot(pROC, col=color, lty = 2, lwd = 2)
+  
+  # Find the best threshold and its x and y coord in the graph
+  best <- coords(pROC, x="best", input="threshold",
+                 ret=c("threshold","specificity", "sensitivity"), 
+                 best.method="closest.topleft")
+  x <- best['specificity']
+  y <- best['sensitivity']
+  thresh <- best['threshold']
+  # Add the point and text for the best cutoff on the plot
+  points(x, y)
+  text(0.7, 0.9, labels=paste(c("Threshold: "), round(thresh,2), sep=""), cex=0.7)
+  
+  # Calculate AUC
+  auc <- round(auc(pROC)[1], 3)
+  # Add the AUC value
+  legend(0.5, 0.4, legend=paste(c("AUC: "), auc,sep=""), 
+       col=color, text.font=4, lty=1, cex=0.8, box.col = "white")
+}
+
+ROC_plot(train1, "glm", "paleturquoise3")
+  title('Log Reg (Method 1)')
+ROC_plot(train1, "bayesglm", "royalblue3")
+  title('Bayesian GLM (Method 1)')
+ROC_plot(train1, "qda", "sienna1")
+  title('QDA (Method 1)')
+ROC_plot(train1, "rpart1SE", "mediumslateblue")
+  title('CART (Method 1)')
+  
+ROC_plot(train2, "glm", "paleturquoise3")
+  title('Log Reg (Method 2)')
+ROC_plot(train2, "bayesglm", "royalblue3")
+  title('Bayesian GLM (Method 2)')
+ROC_plot(train2, "qda", "sienna1")
+  title('QDA (Method 2)')
+ROC_plot(train2, "rpart1SE", "mediumslateblue")
+  title('CART (Method 2)')
+  
+ROC_plot(test1, "glm", "paleturquoise3")
+  title('Log Reg (Method 1)')
+ROC_plot(test1, "bayesglm", "royalblue3")
+  title('Bayesian GLM (Method 1)')
+ROC_plot(test1, "qda", "sienna1")
+  title('QDA (Method 1)')
+ROC_plot(test1, "rpart1SE", "mediumslateblue")
+  title('CART (Method 1)')
+  
+ROC_plot(test2, "glm", "paleturquoise3")
+  title('Log Reg (Method 2)')
+ROC_plot(test2, "bayesglm", "royalblue3")
+  title('Bayesian GLM (Method 2)')
+ROC_plot(test2, "qda", "sienna1")
+  title('QDA (Method 2)')
+ROC_plot(test2, "rpart1SE", "mediumslateblue")
+  title('CART (Method 2)')
+```
+
+### 3c. Other metrics
+```{r}
+library("mccr")
+library("mltools")
+# Fit the models
+lg_model1 = train(label~NDAI+SD+CORR, data = train1, method = "glm")
+bglm_model1 = train(label~NDAI+SD+CORR, data = train1, method = "bayesglm")
+qda_model1 = train(label~NDAI+SD+CORR, data = train1, method = "qda")
+cart_model1 = train(label~NDAI+SD+CORR, data = train1, method = "rpart1SE")
+
+lg_model2 = train(label~NDAI+SD+CORR, data = train2, method = "glm")
+bglm_model2 = train(label~NDAI+SD+CORR, data = train2, method = "bayesglm")
+qda_model2 = train(label~NDAI+SD+CORR, data = train2, method = "qda")
+cart_model2 = train(label~NDAI+SD+CORR, data = train2, method = "rpart1SE")
+
+lg_probs1 =  predict(lg_model1, newdata = test1, type = "prob")
+bglm_probs1 =  predict(bglm_model1, newdata = test1, type = "prob")
+qda_probs1 =  predict(qda_model1, newdata = test1, type = "prob")
+cart_probs1 =  predict(cart_model1, newdata = test1, type = "prob")
+
+lg_probs2 =  predict(lg_model2, newdata = test2, type = "prob")
+bglm_probs2 =  predict(bglm_model2, newdata = test2, type = "prob")
+qda_probs2 =  predict(qda_model2, newdata = test2, type = "prob")
+cart_probs2 =  predict(cart_model2, newdata = test2, type = "prob")
+
+cutoffs1 <- c(0.64,0.64,0.77,0.57)
+cutoffs2 <- c(0.62,0.62,0.77,0.57)
+
+# Confusion Matrix generated by using the best cutoff found in 3b.
+lg_pred1 <- ifelse(lg_probs1[1] > cutoffs1[1], -1, 1)
+ggplot(as.data.frame(table(lg_pred1,test1$label)), aes(x=lg_pred1, y=Var2, fill=Freq)) + 
+  geom_tile() + theme_bw() + coord_equal() +
+  scale_fill_distiller(palette="Greens", direction=1) +
+  guides(fill=F) +
+  ggtitle("Logistic Regression (Method 1)") + 
+  xlab("Predicted Label") + ylab("True Label") +
+  geom_text(aes(label=Freq), color="Black") # printing values
+#calculate other relevant matrics
+sensitivity(table(lg_pred1,test1$label))
+specificity(table(lg_pred1,test1$label))
+prec <- precision(table(lg_pred1,test1$label))
+rec <- recall(table(lg_pred1,test1$label))
+(2*prec*rec) / sum(prec, rec)
+mcc(confusionM = matrix(c(9738,751,1641,8103), nrow=2))
+
+bglm_pred1 <- ifelse(bglm_probs1[1] > cutoffs1[2], -1, 1)
+ggplot(as.data.frame(table(bglm_pred1,test1$label)), aes(x=bglm_pred1, y=Var2, fill=Freq)) + 
+  geom_tile() + theme_bw() + coord_equal() +
+  scale_fill_distiller(palette="Greens", direction=1) +
+  guides(fill=F) +
+  ggtitle("Bayes Linear Regression (Method 1)") + 
+  xlab("Predicted Label") + ylab("True Label") +
+  geom_text(aes(label=Freq), color="Black") # printing values
+
+qda_pred1 <- ifelse(qda_probs1[1] > cutoffs1[3], -1, 1)
+ggplot(as.data.frame(table(qda_pred1,test1$label)), aes(x=qda_pred1, y=Var2, fill=Freq)) + 
+  geom_tile() + theme_bw() + coord_equal() +
+  scale_fill_distiller(palette="Greens", direction=1) +
+  guides(fill=F) +
+  ggtitle("QDA (Method 1)") + 
+  xlab("Predicted Label") + ylab("True Label") +
+  geom_text(aes(label=Freq), color="Black") # printing values
+
+cart_pred1 <- ifelse(cart_probs1[1] > cutoffs1[4], -1, 1)
+ggplot(as.data.frame(table(cart_pred1,test1$label)), aes(x=cart_pred1, y=Var2, fill=Freq)) + 
+  geom_tile() + theme_bw() + coord_equal() +
+  scale_fill_distiller(palette="Greens", direction=1) +
+  guides(fill=F) +
+  ggtitle("CART (Method 1)") + 
+  xlab("Predicted Label") + ylab("True Label") +
+  geom_text(aes(label=Freq), color="Black") # printing values
+
+## METHOD 2
+lg_pred2 <- ifelse(lg_probs2[1] > cutoffs2[1], -1, 1)
+ggplot(as.data.frame(table(lg_pred2,test2$label)), aes(x=lg_pred2, y=Var2, fill=Freq)) + 
+  geom_tile() + theme_bw() + coord_equal() +
+  scale_fill_distiller(palette="Greens", direction=1) +
+  guides(fill=F) +
+  ggtitle("Logistic Regression (Method 2)") + 
+  xlab("Predicted Label") + ylab("True Label") +
+  geom_text(aes(label=Freq), color="Black") # printing values
+
+bglm_pred2 <- ifelse(bglm_probs2[1] > cutoffs2[2], -1, 1)
+ggplot(as.data.frame(table(bglm_pred2,test2$label)), aes(x=bglm_pred2, y=Var2, fill=Freq)) + 
+  geom_tile() + theme_bw() + coord_equal() +
+  scale_fill_distiller(palette="Greens", direction=1) +
+  guides(fill=F) +
+  ggtitle("Bayes Linear Regression (Method 2)") + 
+  xlab("Predicted Label") + ylab("True Label") +
+  geom_text(aes(label=Freq), color="Black") # printing values
+
+qda_pred2 <- ifelse(qda_probs2[1] > cutoffs2[3], -1, 1)
+ggplot(as.data.frame(table(qda_pred2,test2$label)), aes(x=qda_pred2, y=Var2, fill=Freq)) + 
+  geom_tile() + theme_bw() + coord_equal() +
+  scale_fill_distiller(palette="Greens", direction=1) +
+  guides(fill=F) +
+  ggtitle("QDA (Method 2)") + 
+  xlab("Predicted Label") + ylab("True Label") +
+  geom_text(aes(label=Freq), color="Black") # printing values
+sensitivity(table(qda_pred2,test2$label))
+specificity(table(qda_pred2,test2$label))
+prec <- precision(table(qda_pred2,test2$label))
+rec <- recall(table(qda_pred2,test2$label))
+(2*prec*rec) / sum(prec, rec)
+mcc(confusionM = matrix(c(8231,285,2031,14934), nrow=2))
+
+cart_pred2 <- ifelse(cart_probs2[1] > cutoffs2[4], -1, 1)
+ggplot(as.data.frame(table(cart_pred2,test2$label)), aes(x=cart_pred2, y=Var2, fill=Freq)) + 
+  geom_tile() + theme_bw() + coord_equal() +
+  scale_fill_distiller(palette="Greens", direction=1) +
+  guides(fill=F) +
+  ggtitle("CART (Method 2)") + 
+  xlab("Predicted Label") + ylab("True Label") +
+  geom_text(aes(label=Freq), color="Black") # printing values
+sensitivity(table(cart_pred2,test2$label))
+specificity(table(cart_pred2,test2$label))
+prec <- precision(table(cart_pred2,test2$label))
+rec <- recall(table(cart_pred2,test2$label))
+(2*prec*rec) / sum(prec, rec)
+mcc(confusionM = matrix(c(8201,315,2709,14256), nrow=2))
+```
+
+### 4a. In-depth Analysis
+```{r}
+# Visualize QDA boundaries
+#library(klaR)
+#set.seed(123)
+#ind <- sample(nrow(train1), size = 1000, replace=FALSE)
+#sampled1 <- droplevels(train1[ind,])
+#partimat(label~NDAI+SD+CORR, data = sampled1, method = "qda", plot.matrix = TRUE, col.correct='green', col.wrong='red')
+#sampled2 <- droplevels(train2[ind,])
+#partimat(label~NDAI+SD+CORR, data = sampled2, method = "qda", plot.matrix = TRUE, col.correct='green', col.wrong='red')
+```
+
+```{r}
+#covariance by qda
+qda <- qda(label~NDAI+SD+CORR, data = droplevels(train1))
+qda$scaling
+
+# True covariance
+cov(train1[train1$label==1,4:6])
+cov(train1[train1$label==-1,4:6])
+
+# means given by QDA
+qda$means
+
+# True means
+mean(train1[train1$label==1,]$NDAI)
+mean(train1[train1$label==-1,4:6])
+```
+
+```{r}
+# Histograms of predicted probabilities for test1
+names(qda_probs1)[1]<-"neg"
+names(qda_probs1)[2]<-"pos"
+ggplot(qda_probs1, aes(x=pos)) + 
+  geom_histogram(color="black", fill="white") +
+  xlab("Predicted Probability") +
+  geom_vline(xintercept=0.77, color="blue") +
+  annotate(geom="text", x=0.65, y=6000, label="Cutoff", color="blue") +
+  ggtitle("Test 1")
+
+# Histograms of predicted probabilities for test2
+names(qda_probs2)[1]<-"neg"
+names(qda_probs2)[2]<-"pos"
+ggplot(qda_probs2, aes(x=pos)) + 
+  geom_histogram(color="black", fill="white") +
+  xlab("Predicted Probability") +
+  geom_vline(xintercept=0.77, color="blue") +
+  annotate(geom="text", x=0.65, y=6000, label="Cutoff", color="blue") +
+  ggtitle("Test 2")
+
+# Histogram of Agreement scores for test1
+agreement <- rep(NA, nrow(test1))
+for (i in 1:nrow(test1)){
+    if (test1$label[i] == -1){
+      agreement[i] = qda_probs1$neg[i]
+  } else if (test1$label[i] == 1){
+      agreement[i] = qda_probs1$pos[i]
+  }
+}
+ggplot() + 
+  geom_histogram(aes(agreement, y=(..count..)/sum(..count..)), color="black", fill="white") +
+  ggtitle("Test 1") +
+  ylab("percentage")
+
+# Histogram of Agreement scores for test2
+agreement2 <- rep(NA, nrow(test2))
+for (i in 1:nrow(test2)){
+    if (test2$label[i] == -1){
+      agreement2[i] = qda_probs2$neg[i]
+  } else if (test2$label[i] == 1){
+      agreement2[i] = qda_probs2$pos[i]
+  }
+}
+ggplot() + 
+  geom_histogram(aes(agreement2, y=(..count..)/sum(..count..)), color="black", fill="white") +
+  ggtitle("Test 2") +
+  ylab("percentage") +
+  xlab("agreement")
+```
+
+
